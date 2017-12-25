@@ -1,0 +1,9 @@
+# ignore an entire directory
+./data/
+./models/
+
+# ignore a file type
+*.pyc
+*.index
+*.tar.gz
+*.data-00000-of-00001
