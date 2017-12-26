@@ -2,6 +2,7 @@ import tensorflow as tf
 slim = tf.contrib.slim
 
 import numpy as np
+import numba
 
 from optparse import OptionParser
 import wget
@@ -47,6 +48,11 @@ parser.add_option("--classNamesFile", action="store", type="string", dest="class
 # Parse command line options
 (options, args) = parser.parse_args()
 print (options)
+
+numAdverserialUpdates = 100
+sigma = 0.5
+epsilon = 0.5
+assert (options.batchSize == 1)
 
 baseDir = os.getcwd()
 with open(options.classNamesFile, 'r') as imageClassNamesFile:
@@ -165,13 +171,13 @@ global_step = tf.train.get_or_create_global_step()
 with tf.name_scope('Model'):
 	# Data placeholders
 	inputBatchImages, inputBatchImageNames, inputBatchLabels = valIterator.get_next()
-	inputBatchImageLabels = tf.one_hot(inputBatchLabels, depth=options.numClasses)
-
 	print ("Data shape: %s" % str(inputBatchImages.get_shape()))
-	print ("Labels shape: %s" % str(inputBatchImageLabels.get_shape()))
+
+	# Data placeholders
+	inputBatchImagesPlaceholder = tf.placeholder(dtype=tf.float32, shape=[None, options.imageHeight, options.imageWidth, options.imageChannels], name="inputBatchImages")
 
 	if options.model == "IncResV2":
-		scaledInputBatchImages = tf.scalar_mul((1.0 / 255.0), inputBatchImages)
+		scaledInputBatchImages = tf.scalar_mul((1.0 / 255.0), inputBatchImagesPlaceholder)
 		scaledInputBatchImages = tf.subtract(scaledInputBatchImages, 0.5)
 		scaledInputBatchImages = tf.multiply(scaledInputBatchImages, 2.0)
 
@@ -182,12 +188,11 @@ with tf.name_scope('Model'):
 
 	elif options.model == "ResNet":
 		if options.useImageMean:
-			imageMean = tf.reduce_mean(inputBatchImages, axis=[1, 2], keep_dims=True)
+			imageMean = tf.reduce_mean(inputBatchImagesPlaceholder, axis=[1, 2], keep_dims=True)
 			print ("Image mean shape: %s" % str(imageMean.shape))
-			processedInputBatchImages = inputBatchImages - imageMean
+			processedInputBatchImages = inputBatchImagesPlaceholder - imageMean
 		else:
-			print (inputBatchImages.shape)
-			channels = tf.split(axis=3, num_or_size_splits=options.imageChannels, value=inputBatchImages)
+			channels = tf.split(axis=3, num_or_size_splits=options.imageChannels, value=inputBatchImagesPlaceholder)
 			for i in range(options.imageChannels):
 				channels[i] -= IMAGENET_MEAN[i]
 			processedInputBatchImages = tf.concat(axis=3, values=channels)
@@ -200,7 +205,7 @@ with tf.name_scope('Model'):
 			logits, end_points = resnet_v1.resnet_v1_152(processedInputBatchImages, is_training=False)
 
 	elif options.model == "NAS":
-		scaledInputBatchImages = tf.scalar_mul((1.0 / 255.0), inputBatchImages)
+		scaledInputBatchImages = tf.scalar_mul((1.0 / 255.0), inputBatchImagesPlaceholder)
 		scaledInputBatchImages = tf.subtract(scaledInputBatchImages, 0.5)
 		scaledInputBatchImages = tf.multiply(scaledInputBatchImages, 2.0)
 
@@ -213,6 +218,48 @@ with tf.name_scope('Model'):
 	else:
 		print ("Error: Unknown model selected")
 		exit(-1)
+
+
+def computeDistance(firstImage, secondImage):
+	dist = np.mean(np.square(firstImage - secondImage))
+	return dist
+
+# @numba.jit
+def sampleAdverserialExample(sess, originalImage, adverserialImage):
+	# Sample adverserial update from a iid distribution with range [0, 1)
+	adverserialUpdate = np.random.rand(batchImages.shape[1], batchImages.shape[2], batchImages.shape[3])
+	
+	# Clip the values of the update vector so that the first constraint holds
+	adverserialUpdate[(adverserialImage + adverserialUpdate) > 255.0] = 255.0 - adverserialImage[(adverserialImage + adverserialUpdate) > 255.0]
+	adverserialUpdate[(adverserialImage + adverserialUpdate) < 0.0] = -adverserialImage[(adverserialImage + adverserialUpdate) < 0.0] # Since adverserial update cannot be negative, therefore, the adverserial image must be negative
+
+	# Scale the magnitude of the adverial update so that the second constraint holds
+	dist = computeDistance(originalImage, adverserialImage)
+	normOfAdverserialUpdate = np.linalg.norm(adverserialUpdate)
+	alpha = (sigma * dist) / normOfAdverserialUpdate
+	adverserialUpdate = adverserialUpdate * alpha
+
+	# Second condition: Norm of adverserial update = sigma * distance between original image and new adverserial example
+	secondCondMet = (normOfAdverserialUpdate == sigma * dist)
+	if not secondCondMet:
+		print ("Error: Second condition failed")
+		print ("Norm:", normOfAdverserialUpdate, "| Sigma:", sigma, "| Distance:", dist)
+		exit (-1)
+
+	# Third condition: Difference between d(original image, adverserial example) and d(original image, updated adverserial example) should be equal to epsilon * d(original image, adverserial example)
+	distOriginalAdverserial = computeDistance(originalImage, adverserialImage)
+	distOriginalUpdatedAdverserial = computeDistance(inputImage, (adverserialImage + adverserialUpdate))
+	thirdCondMet = (distOriginalAdverserial - distOriginalUpdatedAdverserial == epsilon * distOriginalAdverserial)
+
+	newAdverserialImage = adverserialImage + adverserialUpdate
+	newAdverserialImagePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(newAdverserialImage, axis=0)})
+	imageStillAdverserial = adverserialImagePredictedLabels[0] != predictedLabels[0]
+
+	return newAdverserialImage
+
+
+# Create the predicted class node
+predictedClass = tf.argmax(end_points['Predictions'], axis=1)
 
 # Initializing the variables
 init = tf.global_variables_initializer()
@@ -236,14 +283,43 @@ with tf.Session(config=config) as sess:
 
 	sess.run(valIterator.initializer)
 	
-	start_time = time.time()
-	# Obtain the image
-	[batchImages, batchImageNames, batchLabels, predictions] = sess.run([inputBatchImages, inputBatchImageNames, inputBatchLabels, end_points['Predictions']])
-	print ("Predictions shape:", predictions.shape)
-	print ("Batch image names:", batchImageNames)
-	predictedLabel = np.argmax(predictions, axis=1) - 1 # Subtract 1 to compensate for the offset
-	print ("Predicted label shape:", predictedLabel.shape)
-	for i in range(batchLabels.shape[0]):
-		# if predictions.shape[1] == 1001:
-		print ("Correct: %s |Original label: %s | Predicted Label: %s" % (str(batchLabels[i] == predictedLabel[i]), classDict[batchLabels[i]], classDict[predictedLabel[i]]))	
-	duration = time.time() - start_time
+	while True:
+		start_time = time.time()
+		# Obtain the image
+		[batchImages, batchImageNames, batchLabels] = sess.run([inputBatchImages, inputBatchImageNames, inputBatchLabels])
+		predictedLabels = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: batchImages})
+		predictedLabels -= 1 # Compensate for the offset in the classes (1001)	
+		
+		print ("Predictions shape:", predictedLabels.shape)
+		print ("Batch image names:", batchImageNames)
+
+		# Start creation of adverserial example
+		inputImage = batchImages[0, :, :, :]
+		for i in range(batchLabels.shape[0]):
+			print ("Correct: %s | Original label: %s | Predicted Label: %s" % (str(batchLabels[i] == predictedLabels[i]), classDict[batchLabels[i]], classDict[predictedLabels[i]]))
+			
+			# Initialize the adverserial example
+			while True:
+				adverserialImage = np.random.rand(batchImages.shape[1], batchImages.shape[2], batchImages.shape[3]) * 256.0
+				print ("Adverserial image shape:", adverserialImage.shape)
+
+				adverserialImagePredictedLabels = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(adverserialImage, axis=0)})
+				adverserialImagePredictedLabels -= 1 # Compensate for the offset in the classes (1001)
+				if adverserialImagePredictedLabels[0] != predictedLabels[0]:
+					print ("Image successfully initialized!")
+					print ("Image # %d | Original image prediction: %s | Adverserial image prediction: %s" % (i, classDict[predictedLabels[i]], classDict[adverserialImagePredictedLabels[i]]))
+					break
+
+			# Perform updates on the adverserial example
+			for i in range(numAdverserialUpdates):
+				adverserialImage = sampleAdverserialExample(sess, inputImage, adverserialImage)
+
+			cv2.imshow("Input image", inputImage[:, :, ::-1].astype(np.uint8))
+			cv2.imshow("Adverserial image", adverserialImage[0].astype(np.uint8))
+
+			char = cv2.waitKey()
+			if (char == ord('q')):
+				print ("Process terminated by user!")
+				exit(-1)
+
+		duration = time.time() - start_time
