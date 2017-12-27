@@ -49,14 +49,16 @@ parser.add_option("--classNamesFile", action="store", type="string", dest="class
 (options, args) = parser.parse_args()
 print (options)
 
-numAdverserialUpdates = 100
-sigma = 0.5
-epsilon = 0.5
 assert (options.batchSize == 1)
+
+numAdverserialUpdates = 100
+maxDirections = 25
+sphericalStep = 0.5 # [Sigma]
+originalImageStep = 0.5 # Distance which needs to be reduced (converges to zero) [Epsilon]
 
 baseDir = os.getcwd()
 with open(options.classNamesFile, 'r') as imageClassNamesFile:
-    classDict = eval(imageClassNamesFile.read())
+	classDict = eval(imageClassNamesFile.read())
 
 # Offset the dictionary
 classDictExtended = {0: 'background'}
@@ -220,40 +222,97 @@ with tf.name_scope('Model'):
 		exit(-1)
 
 
-def computeDistance(firstImage, secondImage):
+def computeDistance(firstImage, secondImage, normalized=True):
 	dist = np.mean(np.square(firstImage - secondImage))
+	if normalized:
+		dist = dist / (255.0 * 255.0)
 	return dist
 
+def computeOriginalImageDirection(firstImage, secondImage):
+	originalImageVector = firstImage - secondImage
+	originalImageNorm = np.linalg.norm(originalImageVector)
+	originalImageDirection = originalImageVector / originalImageNorm
+	return originalImageVector, originalImageDirection, originalImageNorm
+
+def generateSphericalCandidates(originalImage, adverserialImage, adverserialUpdate)
+	# Compute unit vector pointing from the original image to the adverserial image
+	originalImageVector, originalImageDirection, originalImageNorm = computeOriginalImageDirection(originalImage, adverserialImage)
+	print ("Original image direction shape:", originalImageDirection.shape, "| Original image norm shape:", originalImageNorm.shape)
+
+	# Project the point onto the sphere
+	projection = np.vdot(adverserialUpdate, originalImageDirection)
+	adverserialUpdate -= projection * originalImageDirection
+	adverserialUpdate *= sphericalStep * originalImageNorm / np.linalg.norm(adverserialUpdate)
+
+	D = 1.0 / np.sqrt(sphericalStep**2 + 1)
+	direction = adverserialUpdate - originalImageVector
+	sphericalCandidate = originalImage + D * direction
+	sphericalCandidate = np.clip(sphericalCandidate, 0.0, 255.0)
+
+	# Add perturbation in the direction of the source
+	newOriginalImageDirection = originalImage - sphericalCandidate
+	newOriginalImageNorm = np.linalg.norm(newOriginalImageDirection)
+
+	# Length assuming spherical candidate to be exactly on the sphere
+	lengthOfSphericalCandidate = originalImageStep * originalImageNorm
+	deviation = newOriginalImageNorm - originalImageNorm
+	lengthOfSphericalCandidate += deviation
+	lengthOfSphericalCandidate = np.maximum(0, lengthOfSphericalCandidate) # Keep only positive numbers
+	lengthOfSphericalCandidate = lengthOfSphericalCandidate / newOriginalImageNorm
+
+	candidate = sphericalCandidate + lengthOfSphericalCandidate * newOriginalImageDirection
+	candidate = np.clip(candidate, 0.0, 255.0)
+
+	return candidate, sphericalCandidate
+
 # @numba.jit
-def sampleAdverserialExample(sess, originalImage, adverserialImage):
-	# Sample adverserial update from a iid distribution with range [0, 1)
-	adverserialUpdate = np.random.rand(batchImages.shape[1], batchImages.shape[2], batchImages.shape[3])
-	
-	# Clip the values of the update vector so that the first constraint holds
-	adverserialUpdate[(adverserialImage + adverserialUpdate) > 255.0] = 255.0 - adverserialImage[(adverserialImage + adverserialUpdate) > 255.0]
-	adverserialUpdate[(adverserialImage + adverserialUpdate) < 0.0] = -adverserialImage[(adverserialImage + adverserialUpdate) < 0.0] # Since adverserial update cannot be negative, therefore, the adverserial image must be negative
+def sampleAdverserialExample(sess, originalImage, originalImageLabel, adverserialImage):
+	# Variables for statistics
+	numSuccess = 0
+	numTotalAttempts = 0
 
-	# Scale the magnitude of the adverial update so that the second constraint holds
-	dist = computeDistance(originalImage, adverserialImage)
-	normOfAdverserialUpdate = np.linalg.norm(adverserialUpdate)
-	alpha = (sigma * dist) / normOfAdverserialUpdate
-	adverserialUpdate = adverserialUpdate * alpha
+	for directionIteration in range(maxDirections):
+		# Sample adverserial update from a iid distribution with range [0, 1)
+		adverserialUpdate = np.random.rand(batchImages.shape[1], batchImages.shape[2], batchImages.shape[3])
+		
+		# Clip the values of the update vector so that the first constraint holds
+		adverserialUpdate[(adverserialImage + adverserialUpdate) > 255.0] = 255.0 - adverserialImage[(adverserialImage + adverserialUpdate) > 255.0]
+		adverserialUpdate[(adverserialImage + adverserialUpdate) < 0.0] = -adverserialImage[(adverserialImage + adverserialUpdate) < 0.0] # Since adverserial update cannot be negative, therefore, the adverserial image must be negative
+		
+		# Generate the candidates based on the input
+		candidate, sphericalCandidate = generateCandidates(originalImage, adverserialImage, adverserialUpdate)
 
-	# Second condition: Norm of adverserial update = sigma * distance between original image and new adverserial example
-	secondCondMet = (normOfAdverserialUpdate == sigma * dist)
-	if not secondCondMet:
-		print ("Error: Second condition failed")
-		print ("Norm:", normOfAdverserialUpdate, "| Sigma:", sigma, "| Distance:", dist)
-		exit (-1)
+		# Check if the spherical candidate is adverserial
+		sphericalCandidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(sphericalCandidate, axis=0)})
+		isSphericalCandidateAdverserial = sphericalCandidatePredictedLabel == originalImageLabel
+		if isSphericalCandidateAdverserial:
+			candidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(candidate, axis=0)})
+			isCandidateAdverserial = candidatePredictedLabel == originalImageLabel
 
-	# Third condition: Difference between d(original image, adverserial example) and d(original image, updated adverserial example) should be equal to epsilon * d(original image, adverserial example)
-	distOriginalAdverserial = computeDistance(originalImage, adverserialImage)
-	distOriginalUpdatedAdverserial = computeDistance(inputImage, (adverserialImage + adverserialUpdate))
-	thirdCondMet = (distOriginalAdverserial - distOriginalUpdatedAdverserial == epsilon * distOriginalAdverserial)
+		# # Scale the magnitude of the adverial update so that the second constraint holds
+		# dist = computeDistance(originalImage, adverserialImage)
+		# normOfAdverserialUpdate = np.linalg.norm(adverserialUpdate)
+		# alpha = (sigma * dist) / normOfAdverserialUpdate
+		# adverserialUpdate = adverserialUpdate * alpha
 
-	newAdverserialImage = adverserialImage + adverserialUpdate
-	newAdverserialImagePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(newAdverserialImage, axis=0)})
-	imageStillAdverserial = adverserialImagePredictedLabels[0] != predictedLabels[0]
+		# # Second condition: Norm of adverserial update = sigma * distance between original image and new adverserial example
+		# secondCondMet = (normOfAdverserialUpdate == sigma * dist)
+		# if not secondCondMet:
+		# 	print ("Error: Second condition failed")
+		# 	print ("Norm:", normOfAdverserialUpdate, "| Sigma:", sigma, "| Distance:", dist)
+		# 	exit (-1)
+
+		# # Third condition: Difference between d(original image, adverserial example) and d(original image, updated adverserial example) should be equal to epsilon * d(original image, adverserial example)
+		# distOriginalAdverserial = computeDistance(originalImage, adverserialImage)
+		# distOriginalUpdatedAdverserial = computeDistance(inputImage, (adverserialImage + adverserialUpdate))
+		# thirdCondMet = (distOriginalAdverserial - distOriginalUpdatedAdverserial == epsilon * distOriginalAdverserial)
+
+		# newAdverserialImage = adverserialImage + adverserialUpdate
+		# newAdverserialImagePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(newAdverserialImage, axis=0)})
+		# imageStillAdverserial = adverserialImagePredictedLabels[0] != predictedLabels[0]
+
+	successProbability = float(numSuccess) / numTotalAttempts
+	print ("Success probability: %f" % (successProbability))
 
 	return newAdverserialImage
 
@@ -312,7 +371,7 @@ with tf.Session(config=config) as sess:
 
 			# Perform updates on the adverserial example
 			for i in range(numAdverserialUpdates):
-				adverserialImage = sampleAdverserialExample(sess, inputImage, adverserialImage)
+				adverserialImage = sampleAdverserialExample(sess, inputImage, batchLabels[0], adverserialImage)
 
 			cv2.imshow("Input image", inputImage[:, :, ::-1].astype(np.uint8))
 			cv2.imshow("Adverserial image", adverserialImage[0].astype(np.uint8))
