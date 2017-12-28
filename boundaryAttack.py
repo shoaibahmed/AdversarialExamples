@@ -67,7 +67,7 @@ if options.writeImagesToLogDir:
 	print ("Creating logs directory")
 	os.mkdir(options.logsDir)
 
-numAdverserialUpdates = 10
+numAdverserialUpdates = 100
 maxDirections = 25
 sphericalStep = 0.5 # [Sigma]
 originalImageStep = 0.5 # Distance which needs to be reduced (converges to zero) [Epsilon]
@@ -272,7 +272,7 @@ def generateCandidates(originalImage, adverserialImage, adverserialUpdate, origi
 	newOriginalImageDirection = originalImage - sphericalCandidate
 	newOriginalImageNorm = np.linalg.norm(newOriginalImageDirection)
 
-	# Length assuming spherical candidate to be exactly on the sphere
+	# Length of the vector assuming spherical candidate to be exactly on the sphere
 	lengthOfSphericalCandidate = originalImageStepSize * originalImageNorm
 	deviation = newOriginalImageNorm - originalImageNorm
 	lengthOfSphericalCandidate += deviation
@@ -284,18 +284,34 @@ def generateCandidates(originalImage, adverserialImage, adverserialUpdate, origi
 
 	return candidate, sphericalCandidate
 
-def updateStepSizes(successProbability):
+def updateStepSizes(sphericalSuccessProbability, stepSuccessProbability):
 	global sphericalStepSize
 	global originalImageStepSize
 
-	if successProbability > 0.5:
+	sphericalBasedParameterChange = True
+	if sphericalSuccessProbability > 0.5:
 		print ('Boundary too linear, increasing steps!')
 		sphericalStepSize *= stepAdaptationRate
 		originalImageStepSize *= stepAdaptationRate
-	elif successProbability < 0.2:
+	elif sphericalSuccessProbability < 0.2:
 		print ('Boundary too non-linear, decreasing steps!')
 		sphericalStepSize /= stepAdaptationRate
 		originalImageStepSize /= stepAdaptationRate
+	else:
+		sphericalBasedParameterChange = False
+
+	stepBasedParameterChange = True
+	if stepSuccessProbability > 0.5:
+		print ('Success rate too high, increasing original image steps!')
+		originalImageStepSize *= stepAdaptationRate
+	elif stepSuccessProbability < 0.2:
+		print ('Success rate too low, decreasing original image steps!')
+		originalImageStepSize /= stepAdaptationRate
+	else:
+		stepBasedParameterChange = False
+
+	if sphericalBasedParameterChange or stepBasedParameterChange:
+		print ("Step parameters updated | Spherical step size (sigma): %f | Original image step size (epsilon): %f" % (sphericalStepSize, originalImageStepSize))
 	else:
 		print ('Retaining previous step parameters')
 
@@ -352,10 +368,13 @@ def sampleAdverserialExample(sess):
 
 		# Check if adverserial attack converged
 		if distance < 1e-7:
-			numStepToConvergence = directionIteration
-			print ("Attack converged after %d iterations" % numStepToConvergence)
+			print ("Attack converged after %d iterations" % step)
 			adverserialImagePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(adverserialImage, axis=0)})
-			return adverserialImage, adverserialImagePredictedLabel
+			newCandidatePredictedLabel = adverserialImagePredictedLabel
+			break
+
+		newAdverserialImageDistance = float('Inf')
+		newAdverserialImage = None
 
 		for directionIteration in range(maxDirections):
 			# Sample adverserial update from a iid distribution with range [0, 1)
@@ -378,17 +397,19 @@ def sampleAdverserialExample(sess):
 				# Perform next iteration
 				continue
 
-			newAdverserialImage = None
 			if isCandidateAdverserial:
-				numSuccessSteps += 1
-				newAdverserialImage = candidate
-				newAdverserialImageDistance = computeDistance(originalImage, newAdverserialImage)
-				newCandidatePredictedLabel = candidatePredictedLabel
+				# newAdverserialImageDistance = computeDistance(originalImage, newAdverserialImage)
+				currentDist = computeDistance(originalImage, candidate)
+				if currentDist < newAdverserialImageDistance:
+					numSuccessSteps += 1
+					newAdverserialImageDistance = currentDist
+					newAdverserialImage = candidate
+					newCandidatePredictedLabel = candidatePredictedLabel
 
 		# Handle the found adverserial example
 		if newAdverserialImage is not None:
 			if newAdverserialImageDistance >= distance:
-				print ("Warning: Current adverserial update distance is greater than the previous distance")
+				print ("Warning: Current adverserial image's distance is greater than the previous distance")
 			else:
 				absoluteImprovement = distance - newAdverserialImageDistance
 				relativeImprovement = absoluteImprovement / distance
@@ -399,14 +420,15 @@ def sampleAdverserialExample(sess):
 				distance = newAdverserialImageDistance
 
 		# Update the alpha and epsilon based on the success probability
-		successProbability = float(numSuccessSpherical) / numTotalAttempts
-		print ("Step: %d | Total attempts: %d | Successful attempts (spherical): %d | Successful attempts (candidate): %d | Spherical success probability: %f" % 
-			(step, numTotalAttempts, numSuccessSpherical, numSuccessSteps, successProbability))
-		updateStepSizes(successProbability)
+		sphericalSuccessProbability = float(numSuccessSpherical) / numTotalAttempts
+		stepSuccessProbability = float(numSuccessSteps) / numTotalAttempts
+		print ("Step: %d | Total attempts: %d | Successful attempts (spherical): %d | Successful attempts (candidate): %d | Spherical success probability: %f | Step success probability: %f" % 
+			(step, numTotalAttempts, numSuccessSpherical, numSuccessSteps, sphericalSuccessProbability, stepSuccessProbability))
+		updateStepSizes(sphericalSuccessProbability, stepSuccessProbability)
 
 		adverserialImageOut = adverserialImage[:, :, ::-1].astype(np.uint8)
-		cv2.putText(adverserialImageOut, 'Initial class prediction: %s' % (classDict[adverserialImagePredictedLabels]), (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
-		cv2.putText(adverserialImageOut, 'Final class prediction: %s' % (classDict[newCandidatePredictedLabel]), (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
+		cv2.putText(adverserialImageOut, 'Initial prediction (adverserial): %s' % (classDict[adverserialImagePredictedLabels]), (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
+		cv2.putText(adverserialImageOut, 'Final prediction (adverserial): %s' % (classDict[newCandidatePredictedLabel]), (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
 
 		if options.writeImagesToLogDir:
 			cv2.imwrite(os.path.join(options.logsDir, fileName + '-adverserial-' + str(step) + '.png'), adverserialImageOut)
