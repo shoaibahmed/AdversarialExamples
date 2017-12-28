@@ -3,9 +3,9 @@
 Playground for experimentation with adverserial examples.
 
 For generation of the adverserial example using boundary attack, execute the script:
-'''
+```
 python boundaryAttack.py --writeImages
-'''
+```
 Passing in the --writeImages flag will write the corresponding adverserial images into the specified log directory.
 
 ![Input image](images/ILSVRC2012_val_00038400-input.png?raw=true "Input Image")
@@ -16,7 +16,6 @@ Passing in the --writeImages flag will write the corresponding adverserial image
 ![Adverserial image (Fourth iteration)](images/ILSVRC2012_val_00038400-adverserial-3.png?raw=true "Adverserial image (Fourth iteration)")
 ![Adverserial image (Fifth iteration)](images/ILSVRC2012_val_00038400-adverserial-4.png?raw=true "Adverserial image (Fifth iteration)")
 ![Adverserial image (Sixth iteration)](images/ILSVRC2012_val_00038400-adverserial-5.png?raw=true "Adverserial image (Sixth iteration)")
-![Adverserial image (Seventh iteration)](images/ILSVRC2012_val_00038400-adverserial-6.png?raw=true "Adverserial image (Seventh iteration)")
 
 <h2>References:</h2>
 <ol>

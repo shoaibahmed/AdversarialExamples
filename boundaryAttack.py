@@ -51,8 +51,14 @@ parser.add_option("--batchSize", action="store", type="int", dest="batchSize", d
 parser.add_option("--logsDir", action="store", type="string", dest="logsDir", default="./logs", help="Directory for saving logs")
 parser.add_option("--valFileName", action="store", type="string", dest="valFileName", default="/mnt/BoundaryAttack/data/filenames.txt", help="List of image files present in the dataset")
 parser.add_option("--classNamesFile", action="store", type="string", dest="classNamesFile", default="/mnt/BoundaryAttack/data/class_names.txt", help="File containing the names of all classes")
-
 parser.add_option("--writeImagesToLogDir", action="store_true", dest="writeImagesToLogDir", default=False, help="Whether to write images to directory")
+
+# Attack parameters
+parser.add_option("--numAdverserialUpdates", action="store", type="int", dest="numAdverserialUpdates", default=100, help="Number of attack iterations to be performed")
+parser.add_option("--numDirectionsToExplore", action="store", type="int", dest="numDirectionsToExplore", default=25, help="Number of random directions to be explored per iteration of the attack")
+parser.add_option("--sigma", action="store", type="float", dest="sigma", default=0.5, help="Sigma to be used for the attack (defines the relative size of the perturbation)")
+parser.add_option("--epsilon", action="store", type="float", dest="epsilon", default=0.5, help="Epsilon to be used for the attack (defines the relative amount by which the distance between the original and the perturbed image is reduced)")
+parser.add_option("--stepAdaptationRate", action="store", type="float", dest="stepAdaptationRate", default=1.5, help="The adaptation rate by which the epsilon and sigma is adjusted")
 
 # Parse command line options
 (options, args) = parser.parse_args()
@@ -67,8 +73,6 @@ if options.writeImagesToLogDir:
 	print ("Creating logs directory")
 	os.mkdir(options.logsDir)
 
-numAdverserialUpdates = 100
-maxDirections = 25
 sphericalStep = 0.5 # [Sigma]
 originalImageStep = 0.5 # Distance which needs to be reduced (converges to zero) [Epsilon]
 stepAdaptationRate = 1.5
@@ -320,8 +324,8 @@ def sampleAdverserialExample(sess):
 	# Reset step sizes
 	global sphericalStepSize
 	global originalImageStepSize
-	originalImageStepSize = originalImageStep
-	sphericalStepSize = sphericalStep
+	originalImageStepSize = options.epsilon
+	sphericalStepSize = options.sigma
 
 	# Obtain the image
 	[batchImages, batchImageNames, batchLabels] = sess.run([inputBatchImages, inputBatchImageNames, inputBatchLabels])
@@ -353,12 +357,12 @@ def sampleAdverserialExample(sess):
 	initialAdverserialImage = adverserialImage.copy().astype(np.uint8)[:, :, ::-1]
 
 	# Iterate over the number of iterations to be performed
-	convergenceStep = numAdverserialUpdates - 1
-	for step in range(numAdverserialUpdates):
+	convergenceStep = options.numAdverserialUpdates - 1
+	for step in range(options.numAdverserialUpdates):
 		# Variables for statistics
 		numSuccessSpherical = 0
 		numSuccessSteps = 0
-		numTotalAttempts = maxDirections
+		numTotalAttempts = options.numDirectionsToExplore
 
 		# Compute unit vector pointing from the original image to the adverserial image
 		originalImageVector, originalImageDirection, originalImageNorm = computeOriginalImageDirection(originalImage, adverserialImage)
@@ -378,7 +382,7 @@ def sampleAdverserialExample(sess):
 		newAdverserialImageDistance = float('Inf')
 		newAdverserialImage = None
 
-		for directionIteration in range(maxDirections):
+		for directionIteration in range(options.numDirectionsToExplore):
 			# Sample adverserial update from a iid distribution with range [0, 1)
 			adverserialUpdate = np.random.rand(originalImage.shape[0], originalImage.shape[1], originalImage.shape[2])
 			
