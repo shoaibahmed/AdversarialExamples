@@ -289,78 +289,79 @@ def updateStepSizes(successProbability):
 
 # @numba.jit
 def sampleAdverserialExample(sess, originalImage, originalImageLabel, adverserialImage):
-	# Variables for statistics
-	numSuccessSpherical = 0
-	numSuccessSteps = 0
-	numTotalAttempts = maxDirections
+	# Reset step sizes
+	global sphericalStepSize
+	global originalImageStepSize
+	originalImageStepSize = originalImageStep
+	sphericalStepSize = sphericalStep
 
-	# Compute unit vector pointing from the original image to the adverserial image
-	originalImageVector, originalImageDirection, originalImageNorm = computeOriginalImageDirection(originalImage, adverserialImage)
-	# print ("Original image direction shape:", originalImageDirection.shape, "| Original image norm shape:", originalImageNorm.shape)
+	# Iterate over the number of iterations to be performed
+	for step in range(numAdverserialUpdates):
+		# Variables for statistics
+		numSuccessSpherical = 0
+		numSuccessSteps = 0
+		numTotalAttempts = maxDirections
 
-	numStepToConvergence = 0
-	distance = computeDistance(originalImage, adverserialImage)
-	print ("Distance between original image and adverserial image: %f" % distance)
+		# Compute unit vector pointing from the original image to the adverserial image
+		originalImageVector, originalImageDirection, originalImageNorm = computeOriginalImageDirection(originalImage, adverserialImage)
 
-	# Check if adverserial attack converged
-	if distance < 1e-7:
-		numStepToConvergence = directionIteration
-		print ("Attack converged after %d iterations" % numStepToConvergence)
-		adverserialImagePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(adverserialImage, axis=0)})
-		return adverserialImage, adverserialImagePredictedLabel, True
+		numStepToConvergence = 0
+		distance = computeDistance(originalImage, adverserialImage)
+		print ("Distance between original image and adverserial image: %f" % distance)
 
-	for directionIteration in range(maxDirections):
-		# print ("Performing adverserial iteration %d out of %d" % (directionIteration, maxDirections))
+		# Check if adverserial attack converged
+		if distance < 1e-7:
+			numStepToConvergence = directionIteration
+			print ("Attack converged after %d iterations" % numStepToConvergence)
+			adverserialImagePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(adverserialImage, axis=0)})
+			return adverserialImage, adverserialImagePredictedLabel
 
-		# Sample adverserial update from a iid distribution with range [0, 1)
-		adverserialUpdate = np.random.rand(batchImages.shape[1], batchImages.shape[2], batchImages.shape[3])
-		
-		# Clip the values of the update vector so that the first constraint holds
-		# adverserialUpdate[(adverserialImage + adverserialUpdate) > 255.0] = 255.0 - adverserialImage[(adverserialImage + adverserialUpdate) > 255.0]
-		# adverserialUpdate[(adverserialImage + adverserialUpdate) < 0.0] = -adverserialImage[(adverserialImage + adverserialUpdate) < 0.0] # Since adverserial update cannot be negative, therefore, the adverserial image must be negative
-		
-		# Generate the candidates based on the input
-		candidate, sphericalCandidate = generateCandidates(originalImage, adverserialImage, adverserialUpdate, originalImageVector, originalImageDirection, originalImageNorm)
+		for directionIteration in range(maxDirections):
+			# Sample adverserial update from a iid distribution with range [0, 1)
+			adverserialUpdate = np.random.rand(batchImages.shape[1], batchImages.shape[2], batchImages.shape[3])
+			
+			# Generate the candidates based on the input
+			candidate, sphericalCandidate = generateCandidates(originalImage, adverserialImage, adverserialUpdate, originalImageVector, originalImageDirection, originalImageNorm)
 
-		# Check if the spherical candidate is adverserial
-		sphericalCandidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(sphericalCandidate, axis=0)})
-		isSphericalCandidateAdverserial = sphericalCandidatePredictedLabel != originalImageLabel
-		isCandidateAdverserial = False
-		if isSphericalCandidateAdverserial:
-			numSuccessSpherical += 1
-			candidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(candidate, axis=0)})
-			isCandidateAdverserial = candidatePredictedLabel != originalImageLabel
-		else:
-			# Perform next iteration
-			continue
+			# Check if the spherical candidate is adverserial
+			sphericalCandidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(sphericalCandidate, axis=0)})
+			isSphericalCandidateAdverserial = sphericalCandidatePredictedLabel != originalImageLabel
+			isCandidateAdverserial = False
+			if isSphericalCandidateAdverserial:
+				numSuccessSpherical += 1
+				candidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(candidate, axis=0)})
+				isCandidateAdverserial = candidatePredictedLabel != originalImageLabel
+			else:
+				# Perform next iteration
+				continue
 
-		newAdverserialImage = None
-		if isCandidateAdverserial:
-			numSuccessSteps += 1
-			newAdverserialImage = candidate
-			newAdverserialImageDistance = computeDistance(originalImage, newAdverserialImage)
-			newCandidatePredictedLabel = candidatePredictedLabel
+			newAdverserialImage = None
+			if isCandidateAdverserial:
+				numSuccessSteps += 1
+				newAdverserialImage = candidate
+				newAdverserialImageDistance = computeDistance(originalImage, newAdverserialImage)
+				newCandidatePredictedLabel = candidatePredictedLabel
 
-	# Handle the found adverserial example
-	if newAdverserialImage is not None:
-		if newAdverserialImageDistance >= distance:
-			print ("Warning: Current adverserial update distance is greater than the previous distance")
-		else:
-			absoluteImprovement = distance - newAdverserialImageDistance
-			relativeImprovement = absoluteImprovement / distance
-			print ("Absolute improvement: %f | Relative improvement: %f" % (absoluteImprovement, relativeImprovement))
+		# Handle the found adverserial example
+		if newAdverserialImage is not None:
+			if newAdverserialImageDistance >= distance:
+				print ("Warning: Current adverserial update distance is greater than the previous distance")
+			else:
+				absoluteImprovement = distance - newAdverserialImageDistance
+				relativeImprovement = absoluteImprovement / distance
+				print ("Absolute improvement: %f | Relative improvement: %f" % (absoluteImprovement, relativeImprovement))
 
-			# Update the variables
-			adverserialImage = newAdverserialImage
-			distance = newAdverserialImageDistance
+				# Update the variables
+				adverserialImage = newAdverserialImage
+				distance = newAdverserialImageDistance
 
-	# Update the alpha and epsilon based on the success probability
-	successProbability = float(numSuccessSpherical) / numTotalAttempts
-	print ("Total attempts: %d | Successful attempts (spherical): %d | Successful attempts (candidate): %d | Spherical success probability: %f" % 
-		(numTotalAttempts, numSuccessSpherical, numSuccessSteps, successProbability))
-	updateStepSizes(successProbability)
+		# Update the alpha and epsilon based on the success probability
+		successProbability = float(numSuccessSpherical) / numTotalAttempts
+		print ("Step: %d | Total attempts: %d | Successful attempts (spherical): %d | Successful attempts (candidate): %d | Spherical success probability: %f" % 
+			(step, numTotalAttempts, numSuccessSpherical, numSuccessSteps, successProbability))
+		updateStepSizes(successProbability)
 
-	return adverserialImage, newCandidatePredictedLabel, False
+	return adverserialImage, newCandidatePredictedLabel
 
 
 # Create the predicted class node
@@ -413,29 +414,26 @@ with tf.Session(config=config) as sess:
 						(i, classDict[batchLabels[i]], classDict[predictedLabels[i]], classDict[adverserialImagePredictedLabels[i]]))
 					break
 
-			# Reset step sizes
-			originalImageStepSize = originalImageStep
-			sphericalStepSize = sphericalStep
-
 			# Perform updates on the adverserial example
 			initialAdverserialImage = adverserialImage.copy().astype(np.uint8)[:, :, ::-1]
-			for j in range(numAdverserialUpdates):
-				adverserialImage, adverserialImagePredictedLabels, attackConverged = sampleAdverserialExample(sess, inputImage, batchLabels[0], adverserialImage)
-				print ("Step: %d | Original image label: %s | Original image prediction: %s | Adverserial image prediction: %s" % 
-					(j, classDict[batchLabels[i]], classDict[predictedLabels[i]], classDict[adverserialImagePredictedLabels[i]]))
+			adverserialImage, adverserialImagePredictedLabels = sampleAdverserialExample(sess, inputImage, batchLabels[0], adverserialImage)
 
-				cv2.imshow("Input image", inputImage[:, :, ::-1].astype(np.uint8))
-				cv2.imshow("Adverserial image", initialAdverserialImage)
-				cv2.imshow("Updated adverserial image", adverserialImage[:, :, ::-1].astype(np.uint8))
+			print ("Original image label: %s | Original image prediction: %s | Adverserial image prediction: %s" % 
+				(classDict[batchLabels[i]], classDict[predictedLabels[i]], classDict[adverserialImagePredictedLabels[i]]))
 
-				char = cv2.waitKey()
-				if (char == ord('q')):
-					print ("Process terminated by user!")
-					exit(-1)
+			inputImageOut = inputImage[:, :, ::-1].astype(np.uint8)
+			cv2.putText(inputImageOut, 'Original class: %s' % (classDict[batchLabels[i]]), (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+			cv2.putText(inputImageOut, 'Original predicted class: %s' % (classDict[predictedLabels[i]]), (5, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+			cv2.imshow("Input image", inputImageOut)
+			cv2.imshow("Adverserial image", initialAdverserialImage)
 
-				if attackConverged:
-					print ("Stopping the attack!")
-					break
+			adverserialImageOut = adverserialImage[:, :, ::-1].astype(np.uint8)
+			cv2.putText(adverserialImageOut, 'Predicted class: %s' % (classDict[adverserialImagePredictedLabels[i]]), (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+			cv2.imshow("Updated adverserial image", adverserialImageOut)
 
+			char = cv2.waitKey()
+			if (char == ord('q')):
+				print ("Process terminated by user!")
+				exit(-1)
 
 		duration = time.time() - start_time
