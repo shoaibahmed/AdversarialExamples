@@ -52,11 +52,20 @@ parser.add_option("--logsDir", action="store", type="string", dest="logsDir", de
 parser.add_option("--valFileName", action="store", type="string", dest="valFileName", default="/mnt/BoundaryAttack/data/filenames.txt", help="List of image files present in the dataset")
 parser.add_option("--classNamesFile", action="store", type="string", dest="classNamesFile", default="/mnt/BoundaryAttack/data/class_names.txt", help="File containing the names of all classes")
 
+parser.add_option("--writeImagesToLogDir", action="store_true", dest="writeImagesToLogDir", default=False, help="Whether to write images to directory")
+
 # Parse command line options
 (options, args) = parser.parse_args()
 print (options)
 
 assert (options.batchSize == 1)
+if options.writeImagesToLogDir:
+	if os.path.exists(options.logsDir):
+		print ("Removing previous directory")
+		shutil.rmtree(options.logsDir)
+
+	print ("Creating logs directory")
+	os.mkdir(options.logsDir)
 
 numAdverserialUpdates = 10
 maxDirections = 25
@@ -232,7 +241,10 @@ with tf.name_scope('Model'):
 		print ("Error: Unknown model selected")
 		exit(-1)
 
+# Create the predicted class node
+predictedClass = tf.argmax(end_points['Predictions'], axis=1)
 
+# Helper methods
 def computeDistance(firstImage, secondImage, normalized=True):
 	dist = np.mean(np.square(firstImage - secondImage))
 	if normalized:
@@ -288,12 +300,41 @@ def updateStepSizes(successProbability):
 		print ('Retaining previous step parameters')
 
 # @numba.jit
-def sampleAdverserialExample(sess, originalImage, originalImageLabel, adverserialImage):
+def sampleAdverserialExample(sess):
 	# Reset step sizes
 	global sphericalStepSize
 	global originalImageStepSize
 	originalImageStepSize = originalImageStep
 	sphericalStepSize = sphericalStep
+
+	# Obtain the image
+	[batchImages, batchImageNames, batchLabels] = sess.run([inputBatchImages, inputBatchImageNames, inputBatchLabels])
+	predictedLabels = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: batchImages})
+	predictedLabels -= 1 # Compensate for the offset in the classes (1001)	
+
+	# Remove the batch dimension
+	originalImage = batchImages[0, :, :, :]
+	batchImageNames = batchImageNames[0].decode("utf-8")
+	batchLabels = batchLabels[0]
+	predictedLabels = predictedLabels[0]
+	fileName = batchImageNames[batchImageNames.rfind(os.sep)+1:batchImageNames.rfind('.')] # Extract the root name
+	print ("Image name: %s | Correct: %s | Original label: %s | Predicted Label: %s" % (batchImageNames, str(batchLabels == predictedLabels), classDict[batchLabels], classDict[predictedLabels]))
+	
+	# Initialize the adverserial example
+	while True:
+		adverserialImage = np.random.rand(originalImage.shape[0], originalImage.shape[1], originalImage.shape[2]) * 256.0
+
+		adverserialImagePredictedLabels = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(adverserialImage, axis=0)})
+		adverserialImagePredictedLabels -= 1 # Compensate for the offset in the classes (1001)
+		adverserialImagePredictedLabels = adverserialImagePredictedLabels[0] # Remove batch dim
+		if adverserialImagePredictedLabels != predictedLabels:
+			print ("Image successfully initialized!")
+			print ("Original image label: %s | Original image prediction: %s | Adverserial image prediction: %s" % 
+				(classDict[batchLabels], classDict[predictedLabels], classDict[adverserialImagePredictedLabels]))
+			break
+
+	# Perform updates on the adverserial example
+	initialAdverserialImage = adverserialImage.copy().astype(np.uint8)[:, :, ::-1]
 
 	# Iterate over the number of iterations to be performed
 	for step in range(numAdverserialUpdates):
@@ -318,19 +359,21 @@ def sampleAdverserialExample(sess, originalImage, originalImageLabel, adverseria
 
 		for directionIteration in range(maxDirections):
 			# Sample adverserial update from a iid distribution with range [0, 1)
-			adverserialUpdate = np.random.rand(batchImages.shape[1], batchImages.shape[2], batchImages.shape[3])
+			adverserialUpdate = np.random.rand(originalImage.shape[0], originalImage.shape[1], originalImage.shape[2])
 			
 			# Generate the candidates based on the input
 			candidate, sphericalCandidate = generateCandidates(originalImage, adverserialImage, adverserialUpdate, originalImageVector, originalImageDirection, originalImageNorm)
 
 			# Check if the spherical candidate is adverserial
 			sphericalCandidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(sphericalCandidate, axis=0)})
-			isSphericalCandidateAdverserial = sphericalCandidatePredictedLabel != originalImageLabel
+			sphericalCandidatePredictedLabel = sphericalCandidatePredictedLabel[0] # Remove batch dim
+			isSphericalCandidateAdverserial = sphericalCandidatePredictedLabel != batchLabels
 			isCandidateAdverserial = False
 			if isSphericalCandidateAdverserial:
 				numSuccessSpherical += 1
 				candidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(candidate, axis=0)})
-				isCandidateAdverserial = candidatePredictedLabel != originalImageLabel
+				candidatePredictedLabel = candidatePredictedLabel[0] # Remove batch dim
+				isCandidateAdverserial = candidatePredictedLabel != batchLabels
 			else:
 				# Perform next iteration
 				continue
@@ -361,11 +404,36 @@ def sampleAdverserialExample(sess, originalImage, originalImageLabel, adverseria
 			(step, numTotalAttempts, numSuccessSpherical, numSuccessSteps, successProbability))
 		updateStepSizes(successProbability)
 
+		adverserialImageOut = adverserialImage[:, :, ::-1].astype(np.uint8)
+		cv2.putText(adverserialImageOut, 'Initial class prediction: %s' % (classDict[adverserialImagePredictedLabels]), (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
+		cv2.putText(adverserialImageOut, 'Final class prediction: %s' % (classDict[newCandidatePredictedLabel]), (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
+
+		if options.writeImagesToLogDir:
+			cv2.imwrite(os.path.join(options.logsDir, fileName + '-adverserial-' + str(step) + '.png'), adverserialImageOut)
+
+	print ("Original image label: %s | Original image prediction: %s | Adverserial image prediction: %s" % 
+		(classDict[batchLabels], classDict[predictedLabels], classDict[adverserialImagePredictedLabels]))
+
+	inputImageOut = originalImage[:, :, ::-1].astype(np.uint8)
+	cv2.putText(inputImageOut, 'Original class: %s' % (classDict[batchLabels]), (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
+	cv2.putText(inputImageOut, 'Original predicted class: %s' % (classDict[predictedLabels]), (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
+	cv2.imshow("Input image", inputImageOut)
+	cv2.imshow("Adverserial image", initialAdverserialImage)	
+	cv2.imshow("Updated adverserial image", adverserialImageOut)
+
+	# Write the images to the log
+	if options.writeImagesToLogDir:
+		cv2.imwrite(os.path.join(options.logsDir, fileName + '-input.png'), inputImageOut)
+		cv2.imwrite(os.path.join(options.logsDir, fileName + '-initial.png'), initialAdverserialImage)
+		cv2.imwrite(os.path.join(options.logsDir, fileName + '-adverserial-' + str(numAdverserialUpdates) + '.png'), adverserialImageOut)
+
+	char = cv2.waitKey()
+	if (char == ord('q')):
+		print ("Process terminated by user!")
+		exit(-1)
+
 	return adverserialImage, newCandidatePredictedLabel
 
-
-# Create the predicted class node
-predictedClass = tf.argmax(end_points['Predictions'], axis=1)
 
 # Initializing the variables
 init = tf.global_variables_initializer()
@@ -390,50 +458,7 @@ with tf.Session(config=config) as sess:
 	sess.run(valIterator.initializer)
 	
 	while True:
-		start_time = time.time()
-		# Obtain the image
-		[batchImages, batchImageNames, batchLabels] = sess.run([inputBatchImages, inputBatchImageNames, inputBatchLabels])
-		predictedLabels = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: batchImages})
-		predictedLabels -= 1 # Compensate for the offset in the classes (1001)	
-		
 		# Start creation of adverserial example
-		inputImage = batchImages[0, :, :, :]
-		for i in range(batchLabels.shape[0]):
-			print ("Correct: %s | Original label: %s | Predicted Label: %s" % (str(batchLabels[i] == predictedLabels[i]), classDict[batchLabels[i]], classDict[predictedLabels[i]]))
-			
-			# Initialize the adverserial example
-			while True:
-				adverserialImage = np.random.rand(batchImages.shape[1], batchImages.shape[2], batchImages.shape[3]) * 256.0
-				print ("Adverserial image shape:", adverserialImage.shape)
-
-				adverserialImagePredictedLabels = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(adverserialImage, axis=0)})
-				adverserialImagePredictedLabels -= 1 # Compensate for the offset in the classes (1001)
-				if adverserialImagePredictedLabels[0] != predictedLabels[0]:
-					print ("Image successfully initialized!")
-					print ("Image # %d | Original image label: %s | Original image prediction: %s | Adverserial image prediction: %s" % 
-						(i, classDict[batchLabels[i]], classDict[predictedLabels[i]], classDict[adverserialImagePredictedLabels[i]]))
-					break
-
-			# Perform updates on the adverserial example
-			initialAdverserialImage = adverserialImage.copy().astype(np.uint8)[:, :, ::-1]
-			adverserialImage, adverserialImagePredictedLabels = sampleAdverserialExample(sess, inputImage, batchLabels[0], adverserialImage)
-
-			print ("Original image label: %s | Original image prediction: %s | Adverserial image prediction: %s" % 
-				(classDict[batchLabels[i]], classDict[predictedLabels[i]], classDict[adverserialImagePredictedLabels[i]]))
-
-			inputImageOut = inputImage[:, :, ::-1].astype(np.uint8)
-			cv2.putText(inputImageOut, 'Original class: %s' % (classDict[batchLabels[i]]), (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
-			cv2.putText(inputImageOut, 'Original predicted class: %s' % (classDict[predictedLabels[i]]), (5, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
-			cv2.imshow("Input image", inputImageOut)
-			cv2.imshow("Adverserial image", initialAdverserialImage)
-
-			adverserialImageOut = adverserialImage[:, :, ::-1].astype(np.uint8)
-			cv2.putText(adverserialImageOut, 'Predicted class: %s' % (classDict[adverserialImagePredictedLabels[i]]), (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
-			cv2.imshow("Updated adverserial image", adverserialImageOut)
-
-			char = cv2.waitKey()
-			if (char == ord('q')):
-				print ("Process terminated by user!")
-				exit(-1)
-
+		start_time = time.time()
+		adverserialImage, adverserialImagePredictedLabels = sampleAdverserialExample(sess)
 		duration = time.time() - start_time
