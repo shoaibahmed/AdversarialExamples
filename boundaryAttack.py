@@ -14,9 +14,16 @@ import time
 import shutil
 import math
 
+# Clone the repository if not already existent
+if not os.path.exists("./models/research/slim"):
+	print ("Cloning TensorFlow models repository")
+	from git import Repo # gitpython
+	Repo.clone_from("https://github.com/tensorflow/models.git", ".")
+	print ("Repository sucessfully cloned!")
+
 # Add the path to the tensorflow models repository
-sys.path.append("/mnt/BoundaryAttack/models/research/slim")
-sys.path.append("/mnt/BoundaryAttack/models/research/slim/nets")
+sys.path.append("./models/research/slim")
+sys.path.append("./models/research/slim/nets")
 
 import inception_resnet_v2
 import resnet_v1
@@ -51,11 +58,14 @@ print (options)
 
 assert (options.batchSize == 1)
 
-numAdverserialUpdates = 100
+numAdverserialUpdates = 10
 maxDirections = 25
 sphericalStep = 0.5 # [Sigma]
 originalImageStep = 0.5 # Distance which needs to be reduced (converges to zero) [Epsilon]
 stepAdaptationRate = 1.5
+
+originalImageStepSize = 0.0
+sphericalStepSize = 0.0
 
 baseDir = os.getcwd()
 with open(options.classNamesFile, 'r') as imageClassNamesFile:
@@ -239,9 +249,9 @@ def generateCandidates(originalImage, adverserialImage, adverserialUpdate, origi
 	# Project the point onto the sphere
 	projection = np.vdot(adverserialUpdate, originalImageDirection)
 	adverserialUpdate -= projection * originalImageDirection
-	adverserialUpdate *= sphericalStep * originalImageNorm / np.linalg.norm(adverserialUpdate)
+	adverserialUpdate *= sphericalStepSize * originalImageNorm / np.linalg.norm(adverserialUpdate)
 
-	D = 1.0 / np.sqrt(sphericalStep**2 + 1)
+	D = 1.0 / np.sqrt(sphericalStepSize**2 + 1)
 	direction = adverserialUpdate - originalImageVector
 	sphericalCandidate = originalImage + D * direction
 	sphericalCandidate = np.clip(sphericalCandidate, 0.0, 255.0)
@@ -251,7 +261,7 @@ def generateCandidates(originalImage, adverserialImage, adverserialUpdate, origi
 	newOriginalImageNorm = np.linalg.norm(newOriginalImageDirection)
 
 	# Length assuming spherical candidate to be exactly on the sphere
-	lengthOfSphericalCandidate = originalImageStep * originalImageNorm
+	lengthOfSphericalCandidate = originalImageStepSize * originalImageNorm
 	deviation = newOriginalImageNorm - originalImageNorm
 	lengthOfSphericalCandidate += deviation
 	lengthOfSphericalCandidate = np.maximum(0, lengthOfSphericalCandidate) # Keep only positive numbers
@@ -263,17 +273,17 @@ def generateCandidates(originalImage, adverserialImage, adverserialUpdate, origi
 	return candidate, sphericalCandidate
 
 def updateStepSizes(successProbability):
-	global sphericalStep
-	global originalImageStep
+	global sphericalStepSize
+	global originalImageStepSize
 
 	if successProbability > 0.5:
 		print ('Boundary too linear, increasing steps!')
-		sphericalStep *= stepAdaptationRate
-		originalImageStep *= stepAdaptationRate
+		sphericalStepSize *= stepAdaptationRate
+		originalImageStepSize *= stepAdaptationRate
 	elif successProbability < 0.2:
 		print ('Boundary too non-linear, decreasing steps!')
-		sphericalStep /= stepAdaptationRate
-		originalImageStep /= stepAdaptationRate
+		sphericalStepSize /= stepAdaptationRate
+		originalImageStepSize /= stepAdaptationRate
 	else:
 		print ('Retaining previous step parameters')
 
@@ -296,7 +306,8 @@ def sampleAdverserialExample(sess, originalImage, originalImageLabel, adverseria
 	if distance < 1e-7:
 		numStepToConvergence = directionIteration
 		print ("Attack converged after %d iterations" % numStepToConvergence)
-		return adverserialImage, True
+		adverserialImagePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(adverserialImage, axis=0)})
+		return adverserialImage, adverserialImagePredictedLabel, True
 
 	for directionIteration in range(maxDirections):
 		# print ("Performing adverserial iteration %d out of %d" % (directionIteration, maxDirections))
@@ -328,6 +339,7 @@ def sampleAdverserialExample(sess, originalImage, originalImageLabel, adverseria
 			numSuccessSteps += 1
 			newAdverserialImage = candidate
 			newAdverserialImageDistance = computeDistance(originalImage, newAdverserialImage)
+			newCandidatePredictedLabel = candidatePredictedLabel
 
 	# Handle the found adverserial example
 	if newAdverserialImage is not None:
@@ -348,7 +360,7 @@ def sampleAdverserialExample(sess, originalImage, originalImageLabel, adverseria
 		(numTotalAttempts, numSuccessSpherical, numSuccessSteps, successProbability))
 	updateStepSizes(successProbability)
 
-	return adverserialImage, False
+	return adverserialImage, newCandidatePredictedLabel, False
 
 
 # Create the predicted class node
@@ -383,9 +395,6 @@ with tf.Session(config=config) as sess:
 		predictedLabels = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: batchImages})
 		predictedLabels -= 1 # Compensate for the offset in the classes (1001)	
 		
-		print ("Predictions shape:", predictedLabels.shape)
-		print ("Batch image names:", batchImageNames)
-
 		# Start creation of adverserial example
 		inputImage = batchImages[0, :, :, :]
 		for i in range(batchLabels.shape[0]):
@@ -400,22 +409,33 @@ with tf.Session(config=config) as sess:
 				adverserialImagePredictedLabels -= 1 # Compensate for the offset in the classes (1001)
 				if adverserialImagePredictedLabels[0] != predictedLabels[0]:
 					print ("Image successfully initialized!")
-					print ("Image # %d | Original image prediction: %s | Adverserial image prediction: %s" % (i, classDict[predictedLabels[i]], classDict[adverserialImagePredictedLabels[i]]))
+					print ("Image # %d | Original image label: %s | Original image prediction: %s | Adverserial image prediction: %s" % 
+						(i, classDict[batchLabels[i]], classDict[predictedLabels[i]], classDict[adverserialImagePredictedLabels[i]]))
 					break
 
+			# Reset step sizes
+			originalImageStepSize = originalImageStep
+			sphericalStepSize = sphericalStep
+
 			# Perform updates on the adverserial example
-			for i in range(numAdverserialUpdates):
-				adverserialImage, attackConverged = sampleAdverserialExample(sess, inputImage, batchLabels[0], adverserialImage)
+			initialAdverserialImage = adverserialImage.copy().astype(np.uint8)[:, :, ::-1]
+			for j in range(numAdverserialUpdates):
+				adverserialImage, adverserialImagePredictedLabels, attackConverged = sampleAdverserialExample(sess, inputImage, batchLabels[0], adverserialImage)
+				print ("Step: %d | Original image label: %s | Original image prediction: %s | Adverserial image prediction: %s" % 
+					(j, classDict[batchLabels[i]], classDict[predictedLabels[i]], classDict[adverserialImagePredictedLabels[i]]))
+
+				cv2.imshow("Input image", inputImage[:, :, ::-1].astype(np.uint8))
+				cv2.imshow("Adverserial image", initialAdverserialImage)
+				cv2.imshow("Updated adverserial image", adverserialImage[:, :, ::-1].astype(np.uint8))
+
+				char = cv2.waitKey()
+				if (char == ord('q')):
+					print ("Process terminated by user!")
+					exit(-1)
+
 				if attackConverged:
 					print ("Stopping the attack!")
 					break
 
-			cv2.imshow("Input image", inputImage[:, :, ::-1].astype(np.uint8))
-			cv2.imshow("Adverserial image", adverserialImage[0].astype(np.uint8))
-
-			char = cv2.waitKey()
-			if (char == ord('q')):
-				print ("Process terminated by user!")
-				exit(-1)
 
 		duration = time.time() - start_time
