@@ -353,6 +353,7 @@ def sampleAdverserialExample(sess):
 	initialAdverserialImage = adverserialImage.copy().astype(np.uint8)[:, :, ::-1]
 
 	# Iterate over the number of iterations to be performed
+	convergenceStep = numAdverserialUpdates - 1
 	for step in range(numAdverserialUpdates):
 		# Variables for statistics
 		numSuccessSpherical = 0
@@ -369,6 +370,7 @@ def sampleAdverserialExample(sess):
 		# Check if adverserial attack converged
 		if distance < 1e-7:
 			print ("Attack converged after %d iterations" % step)
+			convergenceStep = step - 1
 			adverserialImagePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(adverserialImage, axis=0)})
 			newCandidatePredictedLabel = adverserialImagePredictedLabel
 			break
@@ -427,8 +429,9 @@ def sampleAdverserialExample(sess):
 		updateStepSizes(sphericalSuccessProbability, stepSuccessProbability)
 
 		adverserialImageOut = adverserialImage[:, :, ::-1].astype(np.uint8)
-		cv2.putText(adverserialImageOut, 'Initial prediction (adverserial): %s' % (classDict[adverserialImagePredictedLabels]), (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
-		cv2.putText(adverserialImageOut, 'Final prediction (adverserial): %s' % (classDict[newCandidatePredictedLabel]), (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
+		cv2.putText(adverserialImageOut, 'Initial prediction (adverserial): %s' % (classDict[adverserialImagePredictedLabels]), (5, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
+		cv2.putText(adverserialImageOut, 'Final prediction (adverserial): %s' % (classDict[newCandidatePredictedLabel]), (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
+		cv2.putText(adverserialImageOut, 'Distance from original image: %s' % (distance), (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
 
 		if options.writeImagesToLogDir:
 			cv2.imwrite(os.path.join(options.logsDir, fileName + '-adverserial-' + str(step) + '.png'), adverserialImageOut)
@@ -437,8 +440,8 @@ def sampleAdverserialExample(sess):
 		(classDict[batchLabels], classDict[predictedLabels], classDict[adverserialImagePredictedLabels]))
 
 	inputImageOut = originalImage[:, :, ::-1].astype(np.uint8)
-	cv2.putText(inputImageOut, 'Original class: %s' % (classDict[batchLabels]), (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
-	cv2.putText(inputImageOut, 'Original predicted class: %s' % (classDict[predictedLabels]), (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
+	cv2.putText(inputImageOut, 'Original class: %s' % (classDict[batchLabels]), (5, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
+	cv2.putText(inputImageOut, 'Predicted class: %s' % (classDict[predictedLabels]), (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
 	cv2.imshow("Input image", inputImageOut)
 	cv2.imshow("Adverserial image", initialAdverserialImage)	
 	cv2.imshow("Updated adverserial image", adverserialImageOut)
@@ -447,7 +450,7 @@ def sampleAdverserialExample(sess):
 	if options.writeImagesToLogDir:
 		cv2.imwrite(os.path.join(options.logsDir, fileName + '-input.png'), inputImageOut)
 		cv2.imwrite(os.path.join(options.logsDir, fileName + '-initial.png'), initialAdverserialImage)
-		cv2.imwrite(os.path.join(options.logsDir, fileName + '-adverserial-' + str(numAdverserialUpdates) + '.png'), adverserialImageOut)
+		cv2.imwrite(os.path.join(options.logsDir, fileName + '-adverserial-' + str(convergenceStep) + '.png'), adverserialImageOut)
 
 	char = cv2.waitKey()
 	if (char == ord('q')):
