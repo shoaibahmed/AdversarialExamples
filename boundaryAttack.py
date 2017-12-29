@@ -53,12 +53,16 @@ parser.add_option("--valFileName", action="store", type="string", dest="valFileN
 parser.add_option("--classNamesFile", action="store", type="string", dest="classNamesFile", default="/mnt/BoundaryAttack/data/class_names.txt", help="File containing the names of all classes")
 parser.add_option("--writeImagesToLogDir", action="store_true", dest="writeImagesToLogDir", default=False, help="Whether to write images to directory")
 
+parser.add_option("--minDomainValue", action="store", type="float", dest="minDomainValue", default=0.0, help="Minimum value that can occur within the input domain")
+parser.add_option("--maxDomainValue", action="store", type="float", dest="maxDomainValue", default=255.0, help="Maximum value that can occur within the input domain")
+
 # Attack parameters
 parser.add_option("--numAdverserialUpdates", action="store", type="int", dest="numAdverserialUpdates", default=100, help="Number of attack iterations to be performed")
 parser.add_option("--numDirectionsToExplore", action="store", type="int", dest="numDirectionsToExplore", default=25, help="Number of random directions to be explored per iteration of the attack")
 parser.add_option("--sigma", action="store", type="float", dest="sigma", default=0.5, help="Sigma to be used for the attack (defines the relative size of the perturbation)")
 parser.add_option("--epsilon", action="store", type="float", dest="epsilon", default=0.5, help="Epsilon to be used for the attack (defines the relative amount by which the distance between the original and the perturbed image is reduced)")
 parser.add_option("--stepAdaptationRate", action="store", type="float", dest="stepAdaptationRate", default=1.5, help="The adaptation rate by which the epsilon and sigma is adjusted")
+parser.add_option("--convergenceThreshold", action="store", type="float", dest="convergenceThreshold", default=1e-7, help="Threshold for convergence of attack")
 
 # Parse command line options
 (options, args) = parser.parse_args()
@@ -73,12 +77,8 @@ if options.writeImagesToLogDir:
 	print ("Creating logs directory")
 	os.mkdir(options.logsDir)
 
-sphericalStep = 0.5 # [Sigma]
-originalImageStep = 0.5 # Distance which needs to be reduced (converges to zero) [Epsilon]
-stepAdaptationRate = 1.5
-
-originalImageStepSize = 0.0
-sphericalStepSize = 0.0
+currentEpsilon = 0.0
+currentSigma = 0.0
 
 baseDir = os.getcwd()
 with open(options.classNamesFile, 'r') as imageClassNamesFile:
@@ -265,67 +265,67 @@ def generateCandidates(originalImage, adverserialImage, adverserialUpdate, origi
 	# Project the point onto the sphere
 	projection = np.vdot(adverserialUpdate, originalImageDirection)
 	adverserialUpdate -= projection * originalImageDirection
-	adverserialUpdate *= sphericalStepSize * originalImageNorm / np.linalg.norm(adverserialUpdate)
+	adverserialUpdate *= currentSigma * originalImageNorm / np.linalg.norm(adverserialUpdate)
 
-	D = 1.0 / np.sqrt(sphericalStepSize**2 + 1)
+	D = 1.0 / np.sqrt(currentSigma**2 + 1)
 	direction = adverserialUpdate - originalImageVector
 	sphericalCandidate = originalImage + D * direction
-	sphericalCandidate = np.clip(sphericalCandidate, 0.0, 255.0)
+	sphericalCandidate = np.clip(sphericalCandidate, options.minDomainValue, options.maxDomainValue)
 
 	# Add perturbation in the direction of the source
 	newOriginalImageDirection = originalImage - sphericalCandidate
 	newOriginalImageNorm = np.linalg.norm(newOriginalImageDirection)
 
 	# Length of the vector assuming spherical candidate to be exactly on the sphere
-	lengthOfSphericalCandidate = originalImageStepSize * originalImageNorm
+	lengthOfSphericalCandidate = currentEpsilon * originalImageNorm
 	deviation = newOriginalImageNorm - originalImageNorm
 	lengthOfSphericalCandidate += deviation
 	lengthOfSphericalCandidate = np.maximum(0, lengthOfSphericalCandidate) # Keep only positive numbers
 	lengthOfSphericalCandidate = lengthOfSphericalCandidate / newOriginalImageNorm
 
 	candidate = sphericalCandidate + lengthOfSphericalCandidate * newOriginalImageDirection
-	candidate = np.clip(candidate, 0.0, 255.0)
+	candidate = np.clip(candidate, options.minDomainValue, options.maxDomainValue)
 
 	return candidate, sphericalCandidate
 
 def updateStepSizes(sphericalSuccessProbability, stepSuccessProbability):
-	global sphericalStepSize
-	global originalImageStepSize
+	global currentEpsilon
+	global currentSigma
 
 	sphericalBasedParameterChange = True
 	if sphericalSuccessProbability > 0.5:
 		print ('Boundary too linear, increasing steps!')
-		sphericalStepSize *= stepAdaptationRate
-		originalImageStepSize *= stepAdaptationRate
+		currentSigma *= options.stepAdaptationRate
+		currentEpsilon *= options.stepAdaptationRate
 	elif sphericalSuccessProbability < 0.2:
 		print ('Boundary too non-linear, decreasing steps!')
-		sphericalStepSize /= stepAdaptationRate
-		originalImageStepSize /= stepAdaptationRate
+		currentSigma /= options.stepAdaptationRate
+		currentEpsilon /= options.stepAdaptationRate
 	else:
 		sphericalBasedParameterChange = False
 
 	stepBasedParameterChange = True
 	if stepSuccessProbability > 0.5:
 		print ('Success rate too high, increasing original image steps!')
-		originalImageStepSize *= stepAdaptationRate
+		currentEpsilon *= options.stepAdaptationRate
 	elif stepSuccessProbability < 0.2:
 		print ('Success rate too low, decreasing original image steps!')
-		originalImageStepSize /= stepAdaptationRate
+		currentEpsilon /= options.stepAdaptationRate
 	else:
 		stepBasedParameterChange = False
 
 	if sphericalBasedParameterChange or stepBasedParameterChange:
-		print ("Step parameters updated | Spherical step size (sigma): %f | Original image step size (epsilon): %f" % (sphericalStepSize, originalImageStepSize))
+		print ("Step parameters updated | Spherical step size (sigma): %f | Original image step size (epsilon): %f" % (currentSigma, currentEpsilon))
 	else:
 		print ('Retaining previous step parameters')
 
 # @numba.jit
 def sampleAdverserialExample(sess):
 	# Reset step sizes
-	global sphericalStepSize
-	global originalImageStepSize
-	originalImageStepSize = options.epsilon
-	sphericalStepSize = options.sigma
+	global currentSigma
+	global currentEpsilon
+	currentEpsilon = options.epsilon
+	currentSigma = options.sigma
 
 	# Obtain the image
 	[batchImages, batchImageNames, batchLabels] = sess.run([inputBatchImages, inputBatchImageNames, inputBatchLabels])
@@ -372,7 +372,7 @@ def sampleAdverserialExample(sess):
 		print ("Distance between original image and adverserial image: %f" % distance)
 
 		# Check if adverserial attack converged
-		if distance < 1e-7:
+		if distance < options.convergenceThreshold:
 			print ("Attack converged after %d iterations" % step)
 			convergenceStep = step - 1
 			adverserialImagePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(adverserialImage, axis=0)})
