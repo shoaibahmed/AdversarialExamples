@@ -252,7 +252,7 @@ predictedClass = tf.argmax(end_points['Predictions'], axis=1)
 def computeDistance(firstImage, secondImage, normalized=True):
 	dist = np.mean(np.square(firstImage - secondImage))
 	if normalized:
-		dist = dist / (255.0 * 255.0)
+		dist = dist / (options.maxDomainValue * options.maxDomainValue)
 	return dist
 
 def computeOriginalImageDirection(firstImage, secondImage):
@@ -261,7 +261,7 @@ def computeOriginalImageDirection(firstImage, secondImage):
 	originalImageDirection = originalImageVector / originalImageNorm
 	return originalImageVector, originalImageDirection, originalImageNorm
 
-def generateCandidates(originalImage, adverserialImage, adverserialUpdate, originalImageVector, originalImageDirection, originalImageNorm):
+def generateCandidates(originalImage, adverserialUpdate, originalImageVector, originalImageDirection, originalImageNorm):
 	# Project the point onto the sphere
 	projection = np.vdot(adverserialUpdate, originalImageDirection)
 	adverserialUpdate -= projection * originalImageDirection
@@ -376,7 +376,7 @@ def sampleAdverserialExample(sess):
 			print ("Attack converged after %d iterations" % step)
 			convergenceStep = step - 1
 			adverserialImagePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(adverserialImage, axis=0)})
-			newCandidatePredictedLabel = adverserialImagePredictedLabel
+			newCandidatePredictedLabel = adverserialImagePredictedLabel[0]
 			break
 
 		newAdverserialImageDistance = float('Inf')
@@ -387,7 +387,7 @@ def sampleAdverserialExample(sess):
 			adverserialUpdate = np.random.rand(originalImage.shape[0], originalImage.shape[1], originalImage.shape[2])
 			
 			# Generate the candidates based on the input
-			candidate, sphericalCandidate = generateCandidates(originalImage, adverserialImage, adverserialUpdate, originalImageVector, originalImageDirection, originalImageNorm)
+			candidate, sphericalCandidate = generateCandidates(originalImage, adverserialUpdate, originalImageVector, originalImageDirection, originalImageNorm)
 
 			# Check if the spherical candidate is adverserial
 			sphericalCandidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(sphericalCandidate, axis=0)})
@@ -440,8 +440,8 @@ def sampleAdverserialExample(sess):
 		if options.writeImagesToLogDir:
 			cv2.imwrite(os.path.join(options.logsDir, fileName + '-adverserial-' + str(step) + '.png'), adverserialImageOut)
 
-	print ("Original image label: %s | Original image prediction: %s | Adverserial image prediction: %s" % 
-		(classDict[batchLabels], classDict[predictedLabels], classDict[adverserialImagePredictedLabels]))
+	print ("Original image label: %s | Original image prediction: %s | Initial adverserial image prediction: %s | Final adverserial image prediction: %s" % 
+		(classDict[batchLabels], classDict[predictedLabels], classDict[adverserialImagePredictedLabels], classDict[newCandidatePredictedLabel]))
 
 	inputImageOut = originalImage[:, :, ::-1].astype(np.uint8)
 	cv2.putText(inputImageOut, 'Original class: %s' % (classDict[batchLabels]), (5, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
