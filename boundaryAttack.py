@@ -52,6 +52,7 @@ parser.add_option("--logsDir", action="store", type="string", dest="logsDir", de
 parser.add_option("--valFileName", action="store", type="string", dest="valFileName", default="/mnt/BoundaryAttack/data/filenames.txt", help="List of image files present in the dataset")
 parser.add_option("--classNamesFile", action="store", type="string", dest="classNamesFile", default="/mnt/BoundaryAttack/data/class_names.txt", help="File containing the names of all classes")
 parser.add_option("--writeImagesToLogDir", action="store_true", dest="writeImagesToLogDir", default=False, help="Whether to write images to directory")
+parser.add_option("--showImages", action="store_true", dest="showImages", default=False, help="Whether to show adverserial images once they are computed")
 
 parser.add_option("--minDomainValue", action="store", type="float", dest="minDomainValue", default=0.0, help="Minimum value that can occur within the input domain")
 parser.add_option("--maxDomainValue", action="store", type="float", dest="maxDomainValue", default=255.0, help="Maximum value that can occur within the input domain")
@@ -69,6 +70,10 @@ parser.add_option("--convergenceThreshold", action="store", type="float", dest="
 print (options)
 
 assert (options.batchSize == 1)
+if not (options.writeImagesToLogDir or options.showImages):
+	print ("Error: No output selected. Either enable the --showImages flag to show images directly on the screen or --writeImagesToLogDir to write images to log directory.")
+	exit(-1)
+
 if options.writeImagesToLogDir:
 	if os.path.exists(options.logsDir):
 		print ("Removing previous directory")
@@ -372,7 +377,8 @@ def sampleAdverserialExample(sess):
 		print ("Distance between original image and adverserial image: %f" % distance)
 
 		# Check if adverserial attack converged
-		if distance < options.convergenceThreshold:
+		# if distance < options.convergenceThreshold:
+		if currentEpsilon < options.convergenceThreshold:
 			print ("Attack converged after %d iterations" % step)
 			convergenceStep = step - 1
 			adverserialImagePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(adverserialImage, axis=0)})
@@ -446,9 +452,11 @@ def sampleAdverserialExample(sess):
 	inputImageOut = originalImage[:, :, ::-1].astype(np.uint8)
 	cv2.putText(inputImageOut, 'Original class: %s' % (classDict[batchLabels]), (5, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
 	cv2.putText(inputImageOut, 'Predicted class: %s' % (classDict[predictedLabels]), (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
-	cv2.imshow("Input image", inputImageOut)
-	cv2.imshow("Adverserial image", initialAdverserialImage)	
-	cv2.imshow("Updated adverserial image", adverserialImageOut)
+
+	if options.showImages:
+		cv2.imshow("Input image", inputImageOut)
+		cv2.imshow("Adverserial image", initialAdverserialImage)	
+		cv2.imshow("Updated adverserial image", adverserialImageOut)
 
 	# Write the images to the log
 	if options.writeImagesToLogDir:
