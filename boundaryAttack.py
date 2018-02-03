@@ -257,7 +257,9 @@ predictedClass = tf.argmax(end_points['Predictions'], axis=1)
 def computeDistance(firstImage, secondImage, normalized=True):
 	dist = np.mean(np.square(firstImage - secondImage))
 	if normalized:
-		dist = dist / (options.maxDomainValue * options.maxDomainValue)
+		n = np.prod(firstImage.shape)
+		normalizer = n * (options.maxDomainValue - options.minDomainValue)**2 # Square since the differences are also squared
+		dist = dist / normalizer
 	return dist
 
 def computeOriginalImageDirection(firstImage, secondImage):
@@ -293,21 +295,23 @@ def generateCandidates(originalImage, adverserialUpdate, originalImageVector, or
 
 	return candidate, sphericalCandidate
 
-def updateStepSizes(sphericalSuccessProbability, stepSuccessProbability):
+def updateStepSizes(sphericalSuccessProbability, stepSuccessProbability, isSpherical=True):
 	global currentEpsilon
 	global currentSigma
 
-	sphericalBasedParameterChange = True
-	if sphericalSuccessProbability > 0.5:
-		print ('Boundary too linear, increasing steps!')
-		currentSigma *= options.stepAdaptationRate
-		currentEpsilon *= options.stepAdaptationRate
-	elif sphericalSuccessProbability < 0.2:
-		print ('Boundary too non-linear, decreasing steps!')
-		currentSigma /= options.stepAdaptationRate
-		currentEpsilon /= options.stepAdaptationRate
-	else:
-		sphericalBasedParameterChange = False
+	sphericalBasedParameterChange = False
+	if isSpherical:
+		sphericalBasedParameterChange = True
+		if sphericalSuccessProbability > 0.5:
+			print ('Boundary too linear, increasing steps!')
+			currentSigma *= options.stepAdaptationRate
+			currentEpsilon *= options.stepAdaptationRate
+		elif sphericalSuccessProbability < 0.2:
+			print ('Boundary too non-linear, decreasing steps!')
+			currentSigma /= options.stepAdaptationRate
+			currentEpsilon /= options.stepAdaptationRate
+		else:
+			sphericalBasedParameterChange = False
 
 	stepBasedParameterChange = True
 	if stepSuccessProbability > 0.5:
@@ -364,6 +368,8 @@ def sampleAdverserialExample(sess):
 	# Iterate over the number of iterations to be performed
 	convergenceStep = options.numAdverserialUpdates - 1
 	for step in range(options.numAdverserialUpdates):
+		doSpherical = (step % 10 == 0)
+
 		# Variables for statistics
 		numSuccessSpherical = 0
 		numSuccessSteps = 0
@@ -395,22 +401,32 @@ def sampleAdverserialExample(sess):
 			# Generate the candidates based on the input
 			candidate, sphericalCandidate = generateCandidates(originalImage, adverserialUpdate, originalImageVector, originalImageDirection, originalImageNorm)
 
-			# Check if the spherical candidate is adverserial
-			sphericalCandidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(sphericalCandidate, axis=0)})
-			sphericalCandidatePredictedLabel = sphericalCandidatePredictedLabel[0] # Remove batch dim
-			isSphericalCandidateAdverserial = sphericalCandidatePredictedLabel != batchLabels
-			isCandidateAdverserial = False
-			if isSphericalCandidateAdverserial:
-				numSuccessSpherical += 1
+			if doSpherical:
+				# Check if the spherical candidate is adverserial
+				sphericalCandidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(sphericalCandidate, axis=0)})
+				sphericalCandidatePredictedLabel = sphericalCandidatePredictedLabel[0] # Remove batch dim
+				isSphericalCandidateAdverserial = sphericalCandidatePredictedLabel != batchLabels
+				isCandidateAdverserial = False
+				if isSphericalCandidateAdverserial:
+					numSuccessSpherical += 1
+					candidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(candidate, axis=0)})
+					candidatePredictedLabel = candidatePredictedLabel[0] # Remove batch dim
+					isCandidateAdverserial = candidatePredictedLabel != batchLabels
+				else:
+					# Perform next iteration
+					continue
+
+				if isCandidateAdverserial:
+					# newAdverserialImageDistance = computeDistance(originalImage, newAdverserialImage)
+					currentDist = computeDistance(originalImage, candidate)
+					if currentDist < newAdverserialImageDistance:
+						numSuccessSteps += 1
+						newAdverserialImageDistance = currentDist
+						newAdverserialImage = candidate
+						newCandidatePredictedLabel = candidatePredictedLabel
+			else:
 				candidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(candidate, axis=0)})
 				candidatePredictedLabel = candidatePredictedLabel[0] # Remove batch dim
-				isCandidateAdverserial = candidatePredictedLabel != batchLabels
-			else:
-				# Perform next iteration
-				continue
-
-			if isCandidateAdverserial:
-				# newAdverserialImageDistance = computeDistance(originalImage, newAdverserialImage)
 				currentDist = computeDistance(originalImage, candidate)
 				if currentDist < newAdverserialImageDistance:
 					numSuccessSteps += 1
@@ -436,7 +452,7 @@ def sampleAdverserialExample(sess):
 		stepSuccessProbability = float(numSuccessSteps) / numTotalAttempts
 		print ("Step: %d | Total attempts: %d | Successful attempts (spherical): %d | Successful attempts (candidate): %d | Spherical success probability: %f | Step success probability: %f" % 
 			(step, numTotalAttempts, numSuccessSpherical, numSuccessSteps, sphericalSuccessProbability, stepSuccessProbability))
-		updateStepSizes(sphericalSuccessProbability, stepSuccessProbability)
+		updateStepSizes(sphericalSuccessProbability, stepSuccessProbability, isSpherical=doSpherical)
 
 		adverserialImageOut = adverserialImage[:, :, ::-1].astype(np.uint8)
 		cv2.putText(adverserialImageOut, 'Initial prediction (adverserial): %s' % (classDict[adverserialImagePredictedLabels]), (5, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
