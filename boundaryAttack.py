@@ -428,11 +428,13 @@ def sampleAdverserialExample(sess):
 				candidatePredictedLabel = sess.run(predictedClass, feed_dict={inputBatchImagesPlaceholder: np.expand_dims(candidate, axis=0)})
 				candidatePredictedLabel = candidatePredictedLabel[0] # Remove batch dim
 				currentDist = computeDistance(originalImage, candidate)
-				if currentDist < newAdverserialImageDistance:
-					numSuccessSteps += 1
-					newAdverserialImageDistance = currentDist
-					newAdverserialImage = candidate
-					newCandidatePredictedLabel = candidatePredictedLabel
+				isCandidateAdverserial = candidatePredictedLabel != batchLabels
+				if isCandidateAdverserial:
+					if currentDist < newAdverserialImageDistance:
+						numSuccessSteps += 1
+						newAdverserialImageDistance = currentDist
+						newAdverserialImage = candidate
+						newCandidatePredictedLabel = candidatePredictedLabel
 
 		# Handle the found adverserial example
 		if newAdverserialImage is not None:
@@ -469,21 +471,21 @@ def sampleAdverserialExample(sess):
 	cv2.putText(inputImageOut, 'Original class: %s' % (classDict[batchLabels]), (5, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
 	cv2.putText(inputImageOut, 'Predicted class: %s' % (classDict[predictedLabels]), (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1, cv2.LINE_AA)
 
-	if options.showImages:
-		cv2.imshow("Input image", inputImageOut)
-		cv2.imshow("Adverserial image", initialAdverserialImage)	
-		cv2.imshow("Updated adverserial image", adverserialImageOut)
-
 	# Write the images to the log
 	if options.writeImagesToLogDir:
 		cv2.imwrite(os.path.join(options.logsDir, fileName + '-input.png'), inputImageOut)
 		cv2.imwrite(os.path.join(options.logsDir, fileName + '-initial.png'), initialAdverserialImage)
 		cv2.imwrite(os.path.join(options.logsDir, fileName + '-adverserial-' + str(convergenceStep) + '.png'), adverserialImageOut)
 
-	char = cv2.waitKey()
-	if (char == ord('q')):
-		print ("Process terminated by user!")
-		exit(-1)
+	if options.showImages:
+		cv2.imshow("Input image", inputImageOut)
+		cv2.imshow("Adverserial image", initialAdverserialImage)	
+		cv2.imshow("Updated adverserial image", adverserialImageOut)
+
+		char = cv2.waitKey()
+		if (char == ord('q')):
+			print ("Process terminated by user!")
+			exit(-1)
 
 	return adverserialImage, newCandidatePredictedLabel
 
